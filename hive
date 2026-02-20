@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
 HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
@@ -421,6 +421,25 @@ cmd__attach() {
     _attach_new_view
 }
 
+# Called on core to attach and switch to a specific window
+cmd__attach_to() {
+    local target="${1:-}"
+    require_tmux
+    ensure_hive_session
+    local client_id="hive-link-$$"
+    trap - EXIT INT TERM
+    tmux new-session -d -t "$HIVE_SESSION" -s "$client_id" 2>/dev/null || true
+    if [[ -n "$target" ]]; then
+        # Find window index by name
+        local idx
+        idx=$(tmux list-windows -t "$HIVE_SESSION" -F '#{window_name}|#{window_index}' | grep "^${target}|" | cut -d'|' -f2)
+        if [[ -n "$idx" ]]; then
+            tmux select-window -t "$client_id:$idx" 2>/dev/null || true
+        fi
+    fi
+    exec tmux attach-session -t "$client_id" \; set-option destroy-unattached on
+}
+
 _attach_new_view() {
     local client_id="hive-link-$$"
     # Clear any TUI traps so cleanup escape sequences don't interfere with tmux
@@ -469,8 +488,11 @@ cmd_new() {
 
         echo -e "${GREEN}✓${RESET} Created window ${HONEY}${name}${RESET}"
     else
-        # On a link outside tmux, run remotely
-        ssh hive-core "${HIVE_REMOTE_PREFIX} hive new '$name' '$desc'"
+        # On a link outside tmux: create window remotely then connect to it
+        ssh hive-core "${HIVE_REMOTE_PREFIX} hive new '$name' '$desc'" 2>/dev/null
+        # Now connect and switch to the new window
+        local remote_cmd="${HIVE_REMOTE_PREFIX} hive _attach_to '$name'"
+        exec ssh hive-core -t "$remote_cmd"
     fi
 }
 
@@ -1146,6 +1168,7 @@ main() {
         version|--version|-v) echo "hive v${VERSION}" ;;
         # Internal commands
         _attach)       cmd__attach ;;
+        _attach_to)    cmd__attach_to "$@" ;;
         _tui)          _run_tui ;;
         _tui_popup)    cmd__tui_popup ;;
         _status_line)  cmd__status_line ;;
