@@ -1,0 +1,1134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║  hive — seamless multi-machine terminal sessions            ║
+# ║                                                              ║
+# ║  Your always-on machine is the "core".                       ║
+# ║  Your laptops are "links".                                   ║
+# ║  Every terminal tab is a window into the same hive.          ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+VERSION="0.1.0"
+HIVE_REPO="roughcoder/hive-terminals"
+HIVE_RAW_URL="https://raw.githubusercontent.com/${HIVE_REPO}/main/hive"
+HIVE_DIR="$HOME/.hive"
+HIVE_CONFIG="$HIVE_DIR/config"
+HIVE_SESSION="hive"
+HIVE_META_DIR="$HIVE_DIR/meta"
+
+# ── Colors & Symbols ──────────────────────────────────────────
+
+BOLD="\033[1m"
+DIM="\033[2m"
+ITALIC="\033[3m"
+RESET="\033[0m"
+BG_SELECT="\033[48;5;236m"
+BG_HEADER="\033[48;5;235m"
+
+# Accent colors
+HONEY="\033[38;5;214m"
+GOLD="\033[38;5;178m"
+AMBER="\033[38;5;208m"
+GREY="\033[38;5;245m"
+WHITE="\033[38;5;255m"
+RED="\033[38;5;203m"
+GREEN="\033[38;5;114m"
+BLUE="\033[38;5;111m"
+CYAN="\033[38;5;116m"
+
+# Symbols
+SYM_HIVE="⬡"
+SYM_WINDOW="◆"
+SYM_ACTIVE="●"
+SYM_POINTER="▸"
+SYM_EMPTY="○"
+SYM_CORE="⬢"
+SYM_LINK="⬡"
+SYM_CONNECTED="⚡"
+
+# ── Utility Functions ─────────────────────────────────────────
+
+ensure_dir() {
+    mkdir -p "$HIVE_DIR" "$HIVE_META_DIR"
+}
+
+load_config() {
+    ensure_dir
+    if [[ -f "$HIVE_CONFIG" ]]; then
+        source "$HIVE_CONFIG"
+    fi
+}
+
+save_config() {
+    ensure_dir
+    cat > "$HIVE_CONFIG" << EOF
+HIVE_ROLE="$1"
+HIVE_CORE_HOST="${2:-}"
+HIVE_CORE_USER="${3:-}"
+HIVE_MACHINE_NAME="${4:-$(hostname -s)}"
+EOF
+}
+
+require_tmux() {
+    if ! command -v tmux &>/dev/null; then
+        echo -e "${RED}Error:${RESET} tmux is not installed. Run: brew install tmux"
+        exit 1
+    fi
+}
+
+require_core() {
+    load_config
+    if [[ "${HIVE_ROLE:-}" != "core" ]]; then
+        echo -e "${RED}Error:${RESET} This command must be run on a core machine."
+        echo -e "Run ${HONEY}hive init core${RESET} first."
+        exit 1
+    fi
+}
+
+is_in_tmux() {
+    [[ -n "${TMUX:-}" ]]
+}
+
+is_core() {
+    load_config
+    [[ "${HIVE_ROLE:-}" == "core" ]]
+}
+
+is_link() {
+    load_config
+    [[ "${HIVE_ROLE:-}" == "link" ]]
+}
+
+ensure_hive_session() {
+    if ! tmux has-session -t "$HIVE_SESSION" 2>/dev/null; then
+        tmux new-session -d -s "$HIVE_SESSION" -n "main"
+        set_window_meta "$HIVE_SESSION:main" "Default workspace"
+    fi
+}
+
+# ── Window Metadata ───────────────────────────────────────────
+# Descriptions are stored as tmux window options AND in ~/.hive/meta/
+# so they survive tmux restarts
+
+get_window_meta() {
+    local target="$1"
+    # Try tmux option first
+    local desc
+    desc=$(tmux show-options -wqv -t "$target" @hive_desc 2>/dev/null || true)
+    if [[ -n "$desc" ]]; then
+        echo "$desc"
+        return
+    fi
+    # Fallback to file
+    local safe_name
+    safe_name=$(echo "$target" | tr ':/' '__')
+    local meta_file="$HIVE_META_DIR/$safe_name"
+    if [[ -f "$meta_file" ]]; then
+        cat "$meta_file"
+    fi
+}
+
+set_window_meta() {
+    local target="$1"
+    local desc="$2"
+    # Set in tmux
+    tmux set-option -wq -t "$target" @hive_desc "$desc" 2>/dev/null || true
+    # Persist to file
+    ensure_dir
+    local safe_name
+    safe_name=$(echo "$target" | tr ':/' '__')
+    echo "$desc" > "$HIVE_META_DIR/$safe_name"
+}
+
+# ── Window List Data ──────────────────────────────────────────
+
+get_windows() {
+    # Returns: index|name|active_flag|pane_count|description
+    ensure_hive_session
+    local current_window=""
+    if is_in_tmux; then
+        current_window=$(tmux display-message -p '#W' 2>/dev/null || true)
+    fi
+
+    tmux list-windows -t "$HIVE_SESSION" -F '#{window_index}|#{window_name}|#{window_active}|#{window_panes}|#{pane_current_command}' 2>/dev/null | while IFS='|' read -r idx name active panes cmd; do
+        local desc
+        desc=$(get_window_meta "$HIVE_SESSION:$name" 2>/dev/null || true)
+        local is_current=0
+        if [[ "$name" == "$current_window" ]] && is_in_tmux; then
+            is_current=1
+        fi
+        echo "${idx}|${name}|${active}|${panes}|${cmd}|${desc:-}|${is_current}"
+    done
+}
+
+count_attached() {
+    tmux list-clients -t "$HIVE_SESSION" 2>/dev/null | wc -l | tr -d ' '
+}
+
+# ── Init Commands ─────────────────────────────────────────────
+
+cmd_init_core() {
+    require_tmux
+    local machine_name="${1:-$(hostname -s)}"
+
+    echo -e "\n${HONEY}${SYM_CORE} Initializing hive core${RESET} on ${BOLD}${machine_name}${RESET}\n"
+
+    # Save config
+    save_config "core" "" "" "$machine_name"
+
+    # Create tmux config if not exists
+    local tmux_conf="$HIVE_DIR/tmux.conf"
+    if [[ ! -f "$tmux_conf" ]]; then
+        cat > "$tmux_conf" << 'TMUXCONF'
+# hive tmux configuration
+set -g default-terminal "tmux-256color"
+set -ag terminal-overrides ",xterm-256color:RGB"
+set -g mouse on
+set -g history-limit 50000
+set -g base-index 1
+setw -g pane-base-index 1
+set -g renumber-windows on
+set -g set-titles on
+set -g set-titles-string "hive: #W"
+
+# Status bar - minimal and honey-themed
+set -g status-style "bg=#1a1a1a,fg=#d4a843"
+set -g status-left "#[bg=#2a2a2a,fg=#d4a843,bold] ⬢ hive #[default] "
+set -g status-left-length 20
+set -g status-right "#[fg=#666666]#(hive _status_line) #[default]"
+set -g status-right-length 60
+set -g window-status-format " #[fg=#666666]#I#[fg=#888888]:#W "
+set -g window-status-current-format " #[bg=#2a2a2a,fg=#d4a843,bold]#I:#W #[default]"
+set -g window-status-separator ""
+
+# Pane borders
+set -g pane-border-style "fg=#333333"
+set -g pane-active-border-style "fg=#d4a843"
+
+# Key bindings for hive integration
+bind-key H run-shell "hive _tui_popup"
+bind-key N command-prompt -p "Window name:" "run-shell 'hive new \"%%\"'"
+bind-key D command-prompt -p "Description:" "run-shell 'hive tag \"%%\"'"
+TMUXCONF
+        echo -e "  ${GREEN}✓${RESET} Created tmux config at ${DIM}${tmux_conf}${RESET}"
+    fi
+
+    # Add source line to ~/.tmux.conf if needed
+    if [[ -f "$HOME/.tmux.conf" ]]; then
+        if ! grep -q "hive/tmux.conf" "$HOME/.tmux.conf" 2>/dev/null; then
+            echo "" >> "$HOME/.tmux.conf"
+            echo "# hive configuration" >> "$HOME/.tmux.conf"
+            echo "source-file $tmux_conf" >> "$HOME/.tmux.conf"
+            echo -e "  ${GREEN}✓${RESET} Added source to ~/.tmux.conf"
+        fi
+    else
+        echo "source-file $tmux_conf" > "$HOME/.tmux.conf"
+        echo -e "  ${GREEN}✓${RESET} Created ~/.tmux.conf"
+    fi
+
+    # Create launchd agent
+    local plist="$HOME/Library/LaunchAgents/com.hive.tmux.plist"
+    local tmux_path
+    tmux_path=$(which tmux)
+    cat > "$plist" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hive.tmux</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${tmux_path}</string>
+        <string>start-server</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${HIVE_DIR}/tmux.log</string>
+    <key>StandardErrorPath</key>
+    <string>${HIVE_DIR}/tmux.err</string>
+</dict>
+</plist>
+PLIST
+    echo -e "  ${GREEN}✓${RESET} Created launch agent"
+
+    # Load the agent
+    launchctl unload "$plist" 2>/dev/null || true
+    launchctl load "$plist" 2>/dev/null || true
+    echo -e "  ${GREEN}✓${RESET} tmux server starting on boot"
+
+    # Start the hive session
+    ensure_hive_session
+    echo -e "  ${GREEN}✓${RESET} Hive session created"
+
+    # Copy hive to path
+    _ensure_in_path
+
+    echo -e "\n${HONEY}${SYM_HIVE} Core is ready!${RESET}"
+    echo -e "  ${DIM}Run ${RESET}${HONEY}hive${RESET}${DIM} to open the session picker${RESET}"
+    echo -e "  ${DIM}Inside tmux, press ${RESET}${HONEY}prefix + H${RESET}${DIM} for the hive menu${RESET}\n"
+}
+
+cmd_init_link() {
+    local core_host="${1:-}"
+    local core_user="${2:-$(whoami)}"
+
+    if [[ -z "$core_host" ]]; then
+        echo -e "\n${HONEY}${SYM_LINK} Initialize hive link${RESET}\n"
+        echo -n -e "  ${WHITE}Core hostname ${DIM}(tailscale name or IP)${RESET}: "
+        read -r core_host
+        echo -n -e "  ${WHITE}Core username ${DIM}[${core_user}]${RESET}: "
+        read -r input_user
+        core_user="${input_user:-$core_user}"
+    fi
+
+    if [[ -z "$core_host" ]]; then
+        echo -e "${RED}Error:${RESET} Core hostname is required."
+        exit 1
+    fi
+
+    local machine_name
+    machine_name=$(hostname -s)
+    save_config "link" "$core_host" "$core_user" "$machine_name"
+
+    echo -e "\n${HONEY}${SYM_LINK} Initializing hive link${RESET} on ${BOLD}${machine_name}${RESET}\n"
+
+    # Setup SSH config
+    local ssh_config="$HOME/.ssh/config"
+    mkdir -p "$HOME/.ssh"
+
+    if ! grep -q "Host hive-core" "$ssh_config" 2>/dev/null; then
+        cat >> "$ssh_config" << SSHCONF
+
+# hive - managed connection to core
+Host hive-core
+    HostName ${core_host}
+    User ${core_user}
+    ServerAliveInterval 30
+    ServerAliveCountdown 3
+    RequestTTY yes
+    # Fast reconnection
+    ControlMaster auto
+    ControlPath ~/.ssh/hive-%r@%h:%p
+    ControlPersist 10m
+SSHCONF
+        echo -e "  ${GREEN}✓${RESET} SSH config added (Host: hive-core)"
+    else
+        echo -e "  ${DIM}~${RESET} SSH config already exists, updating..."
+        # Simple update — remove old block and rewrite
+        sed -i.bak '/# hive - managed/,/ControlPersist/d' "$ssh_config"
+        cat >> "$ssh_config" << SSHCONF
+
+# hive - managed connection to core
+Host hive-core
+    HostName ${core_host}
+    User ${core_user}
+    ServerAliveInterval 30
+    ServerAliveCountdown 3
+    RequestTTY yes
+    ControlMaster auto
+    ControlPath ~/.ssh/hive-%r@%h:%p
+    ControlPersist 10m
+SSHCONF
+        echo -e "  ${GREEN}✓${RESET} SSH config updated"
+    fi
+
+    _ensure_in_path
+
+    # Test connection
+    echo -e "\n  ${DIM}Testing connection to ${core_host}...${RESET}"
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes hive-core "echo ok" &>/dev/null; then
+        echo -e "  ${GREEN}✓${RESET} Connection successful!"
+
+        # Check if hive is on the core
+        if ssh hive-core "command -v hive" &>/dev/null; then
+            echo -e "  ${GREEN}✓${RESET} Hive found on core"
+        else
+            echo -e "  ${AMBER}!${RESET} Hive not found on core — install it there too with ${HONEY}hive init core${RESET}"
+        fi
+    else
+        echo -e "  ${AMBER}!${RESET} Could not connect — check the hostname and that SSH keys are set up"
+        echo -e "  ${DIM}You may need to run: ssh-copy-id ${core_user}@${core_host}${RESET}"
+    fi
+
+    echo -e "\n${HONEY}${SYM_HIVE} Link is ready!${RESET}"
+    echo -e "  ${DIM}Run ${RESET}${HONEY}hive${RESET}${DIM} to connect to core${RESET}\n"
+}
+
+_ensure_in_path() {
+    local install_dir="$HOME/.local/bin"
+    mkdir -p "$install_dir"
+
+    local self
+    self=$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")
+
+    if [[ "$self" != "$install_dir/hive" ]]; then
+        cp "$self" "$install_dir/hive"
+        chmod +x "$install_dir/hive"
+    fi
+
+    if [[ ":$PATH:" != *":$install_dir:"* ]]; then
+        echo -e "  ${AMBER}!${RESET} Add to your PATH: ${DIM}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}"
+    fi
+}
+
+# ── Connect (Link → Core) ────────────────────────────────────
+
+cmd_connect() {
+    load_config
+
+    if [[ "${HIVE_ROLE:-}" == "core" ]]; then
+        # Already on core, just open TUI or attach
+        ensure_hive_session
+        if is_in_tmux; then
+            cmd_tui
+        else
+            _attach_new_view
+        fi
+        return
+    fi
+
+    if [[ "${HIVE_ROLE:-}" != "link" ]]; then
+        echo -e "${RED}Error:${RESET} Not configured. Run ${HONEY}hive init link${RESET} or ${HONEY}hive init core${RESET}"
+        exit 1
+    fi
+
+    # SSH to core and run hive there
+    local remote_cmd="hive _attach"
+    exec ssh hive-core -t "$remote_cmd"
+}
+
+# Called on core by SSH connections from links
+cmd__attach() {
+    require_tmux
+    ensure_hive_session
+    _attach_new_view
+}
+
+_attach_new_view() {
+    local client_id="hive-link-$$"
+    # Create a grouped session that shares windows with main hive session
+    tmux new-session -d -t "$HIVE_SESSION" -s "$client_id" 2>/dev/null || true
+    exec tmux attach-session -t "$client_id" \; set-option destroy-unattached on
+}
+
+# ── Window Management ─────────────────────────────────────────
+
+cmd_new() {
+    local name="${1:-}"
+    local desc="${2:-}"
+
+    if is_core || is_in_tmux; then
+        ensure_hive_session
+
+        if [[ -n "$name" ]]; then
+            tmux new-window -t "$HIVE_SESSION" -n "$name"
+        else
+            tmux new-window -t "$HIVE_SESSION"
+            name=$(tmux display-message -t "$HIVE_SESSION" -p '#W')
+        fi
+
+        if [[ -n "$desc" ]]; then
+            set_window_meta "$HIVE_SESSION:$name" "$desc"
+        fi
+
+        # If in tmux, switch to the new window
+        if is_in_tmux; then
+            local idx
+            idx=$(tmux list-windows -t "$HIVE_SESSION" -F '#{window_name}|#{window_index}' | grep "^${name}|" | cut -d'|' -f2)
+            tmux select-window -t "$HIVE_SESSION:$idx" 2>/dev/null || true
+        fi
+
+        echo -e "${GREEN}✓${RESET} Created window ${HONEY}${name}${RESET}"
+    else
+        # On a link, run remotely
+        ssh hive-core "hive new '$name' '$desc'"
+    fi
+}
+
+cmd_ls() {
+    if is_link && ! is_in_tmux; then
+        ssh hive-core "hive ls"
+        return
+    fi
+
+    ensure_hive_session
+    local clients
+    clients=$(count_attached)
+
+    echo -e "\n${HONEY}${SYM_HIVE} hive${RESET} ${DIM}— ${HIVE_MACHINE_NAME:-$(hostname -s)}${RESET} ${DIM}(${clients} connected)${RESET}\n"
+
+    local has_windows=0
+    while IFS='|' read -r idx name active panes cmd desc is_current; do
+        has_windows=1
+        local prefix="  "
+        local style=""
+        local indicator="${GREY}${SYM_EMPTY}${RESET}"
+
+        if [[ "$is_current" == "1" ]]; then
+            prefix="  "
+            style="${BOLD}"
+            indicator="${HONEY}${SYM_ACTIVE}${RESET}"
+        fi
+
+        local name_display="${HONEY}${style}${name}${RESET}"
+        local idx_display="${DIM}${idx}${RESET}"
+        local cmd_display="${DIM}${cmd}${RESET}"
+
+        if [[ -n "$desc" ]]; then
+            echo -e "${prefix}${indicator} ${idx_display} ${name_display}  ${GREY}— ${ITALIC}${desc}${RESET}"
+        else
+            echo -e "${prefix}${indicator} ${idx_display} ${name_display}  ${cmd_display}"
+        fi
+    done < <(get_windows)
+
+    if [[ "$has_windows" == "0" ]]; then
+        echo -e "  ${DIM}No windows. Run ${RESET}${HONEY}hive new${RESET}${DIM} to create one.${RESET}"
+    fi
+    echo ""
+}
+
+cmd_tag() {
+    local desc="${1:-}"
+
+    if [[ -z "$desc" ]]; then
+        echo -n -e "${WHITE}Description: ${RESET}"
+        read -r desc
+    fi
+
+    if [[ -z "$desc" ]]; then
+        echo -e "${RED}Error:${RESET} Description required."
+        return 1
+    fi
+
+    if is_in_tmux; then
+        local window_name
+        window_name=$(tmux display-message -p '#W')
+        set_window_meta "$HIVE_SESSION:$window_name" "$desc"
+        echo -e "${GREEN}✓${RESET} Tagged ${HONEY}${window_name}${RESET} — ${ITALIC}${desc}${RESET}"
+    elif is_link; then
+        ssh hive-core "hive tag '$desc'"
+    else
+        echo -e "${RED}Error:${RESET} Must be inside a hive session or specify a window."
+        return 1
+    fi
+}
+
+cmd_rename() {
+    local new_name="${1:-}"
+
+    if [[ -z "$new_name" ]]; then
+        echo -n -e "${WHITE}New name: ${RESET}"
+        read -r new_name
+    fi
+
+    if [[ -z "$new_name" ]]; then
+        echo -e "${RED}Error:${RESET} Name required."
+        return 1
+    fi
+
+    if is_in_tmux; then
+        local old_name
+        old_name=$(tmux display-message -p '#W')
+        # Migrate description
+        local desc
+        desc=$(get_window_meta "$HIVE_SESSION:$old_name")
+        tmux rename-window -t "$HIVE_SESSION" "$new_name"
+        if [[ -n "$desc" ]]; then
+            set_window_meta "$HIVE_SESSION:$new_name" "$desc"
+        fi
+        echo -e "${GREEN}✓${RESET} Renamed ${DIM}${old_name}${RESET} → ${HONEY}${new_name}${RESET}"
+    elif is_link; then
+        ssh hive-core "hive rename '$new_name'"
+    else
+        echo -e "${RED}Error:${RESET} Must be inside a hive session."
+        return 1
+    fi
+}
+
+cmd_close() {
+    local target="${1:-}"
+
+    if is_in_tmux; then
+        if [[ -n "$target" ]]; then
+            tmux kill-window -t "$HIVE_SESSION:$target"
+            echo -e "${GREEN}✓${RESET} Closed window ${DIM}${target}${RESET}"
+        else
+            local name
+            name=$(tmux display-message -p '#W')
+            tmux kill-window
+            echo -e "${GREEN}✓${RESET} Closed ${DIM}${name}${RESET}"
+        fi
+    elif is_link; then
+        ssh hive-core "hive close '$target'"
+    else
+        echo -e "${RED}Error:${RESET} Must be inside a hive session or specify a window."
+    fi
+}
+
+# ── Interactive TUI ───────────────────────────────────────────
+
+cmd_tui() {
+    if is_link && ! is_in_tmux; then
+        ssh hive-core -t "hive _tui"
+        return
+    fi
+
+    ensure_hive_session
+    _run_tui
+}
+
+cmd__tui_popup() {
+    # For use inside tmux as a popup
+    if command -v tmux &>/dev/null && is_in_tmux; then
+        tmux display-popup -E -w 70 -h 20 -T " ${SYM_HIVE} hive " "hive _tui"
+    else
+        _run_tui
+    fi
+}
+
+_run_tui() {
+    local selected=0
+    local windows=()
+    local action=""
+
+    # Hide cursor
+    tput civis 2>/dev/null || true
+    trap '_tui_cleanup' EXIT INT TERM
+
+    while true; do
+        _tui_refresh_windows
+        local win_count=${#windows[@]}
+
+        if [[ "$win_count" -eq 0 ]]; then
+            _tui_draw_empty
+            _tui_read_key
+            case "$REPLY" in
+                n) _tui_action_new; continue ;;
+                q) break ;;
+            esac
+            continue
+        fi
+
+        # Clamp selection
+        if (( selected >= win_count )); then
+            selected=$((win_count - 1))
+        fi
+        if (( selected < 0 )); then
+            selected=0
+        fi
+
+        _tui_draw "$selected"
+        _tui_read_key
+
+        case "$REPLY" in
+            UP)
+                (( selected > 0 )) && (( selected-- ))
+                ;;
+            DOWN)
+                (( selected < win_count - 1 )) && (( selected++ ))
+                ;;
+            ENTER)
+                _tui_action_join "$selected"
+                break
+                ;;
+            n)
+                _tui_action_new
+                ;;
+            d)
+                _tui_action_describe "$selected"
+                ;;
+            r)
+                _tui_action_rename "$selected"
+                ;;
+            x)
+                _tui_action_close "$selected"
+                ;;
+            q|ESC)
+                break
+                ;;
+        esac
+    done
+}
+
+_tui_cleanup() {
+    tput cnorm 2>/dev/null || true  # Show cursor
+    echo -e "\033[?25h"            # Ensure cursor visible
+    tput sgr0 2>/dev/null || true   # Reset attributes
+}
+
+_tui_refresh_windows() {
+    windows=()
+    while IFS= read -r line; do
+        windows+=("$line")
+    done < <(get_windows)
+}
+
+_tui_read_key() {
+    REPLY=""
+    local key
+    IFS= read -rsn1 key
+
+    case "$key" in
+        $'\x1b')
+            read -rsn2 -t 0.1 key || true
+            case "$key" in
+                '[A') REPLY="UP" ;;
+                '[B') REPLY="DOWN" ;;
+                *) REPLY="ESC" ;;
+            esac
+            ;;
+        '') REPLY="ENTER" ;;
+        *) REPLY="$key" ;;
+    esac
+}
+
+_tui_draw() {
+    local sel=$1
+    local clients
+    clients=$(count_attached)
+
+    # Clear screen
+    echo -ne "\033[2J\033[H"
+
+    # Header
+    echo -e ""
+    echo -e "  ${HONEY}${BOLD}${SYM_HIVE} hive${RESET}  ${DIM}${HIVE_MACHINE_NAME:-$(hostname -s)}${RESET}  ${DIM}${clients} connected${RESET}"
+    echo -e "  ${DIM}$(printf '%.0s─' {1..50})${RESET}"
+    echo ""
+
+    # Windows
+    local i=0
+    for line in "${windows[@]}"; do
+        IFS='|' read -r idx name active panes cmd desc is_current <<< "$line"
+
+        local pointer="  "
+        local bg=""
+        local name_color="${WHITE}"
+        local extra=""
+
+        if (( i == sel )); then
+            pointer="${HONEY}${SYM_POINTER}${RESET} "
+            bg="${BG_SELECT}"
+            name_color="${HONEY}${BOLD}"
+        fi
+
+        local indicator="${GREY}${SYM_EMPTY}${RESET}"
+        if [[ "$is_current" == "1" ]]; then
+            indicator="${GREEN}${SYM_ACTIVE}${RESET}"
+            extra=" ${GREEN}${DIM}(here)${RESET}"
+        fi
+
+        local desc_display=""
+        if [[ -n "$desc" ]]; then
+            desc_display="  ${GREY}${ITALIC}${desc}${RESET}"
+        else
+            desc_display="  ${DIM}${cmd}${RESET}"
+        fi
+
+        echo -e "  ${bg}${pointer}${indicator} ${DIM}${idx}${RESET} ${bg}${name_color}${name}${RESET}${extra}${desc_display}${RESET}"
+
+        (( i++ ))
+    done
+
+    # Footer
+    echo ""
+    echo -e "  ${DIM}$(printf '%.0s─' {1..50})${RESET}"
+    echo -e "  ${HONEY}↑↓${RESET} ${DIM}navigate${RESET}  ${HONEY}⏎${RESET} ${DIM}join${RESET}  ${HONEY}n${RESET} ${DIM}new${RESET}  ${HONEY}d${RESET} ${DIM}describe${RESET}  ${HONEY}r${RESET} ${DIM}rename${RESET}  ${HONEY}x${RESET} ${DIM}close${RESET}  ${HONEY}q${RESET} ${DIM}quit${RESET}"
+    echo ""
+}
+
+_tui_draw_empty() {
+    echo -ne "\033[2J\033[H"
+    echo ""
+    echo -e "  ${HONEY}${BOLD}${SYM_HIVE} hive${RESET}  ${DIM}${HIVE_MACHINE_NAME:-$(hostname -s)}${RESET}"
+    echo -e "  ${DIM}$(printf '%.0s─' {1..50})${RESET}"
+    echo ""
+    echo -e "  ${DIM}No windows yet.${RESET}"
+    echo ""
+    echo -e "  ${DIM}$(printf '%.0s─' {1..50})${RESET}"
+    echo -e "  ${HONEY}n${RESET} ${DIM}new window${RESET}  ${HONEY}q${RESET} ${DIM}quit${RESET}"
+    echo ""
+}
+
+_tui_action_join() {
+    local sel=$1
+    local line="${windows[$sel]}"
+    IFS='|' read -r idx name active panes cmd desc is_current <<< "$line"
+
+    _tui_cleanup
+
+    if is_in_tmux; then
+        tmux select-window -t "$HIVE_SESSION:$idx"
+    else
+        _attach_new_view
+    fi
+}
+
+_tui_action_new() {
+    tput cnorm 2>/dev/null || true
+    echo -ne "\033[2J\033[H"
+    echo ""
+    echo -e "  ${HONEY}${BOLD}+ New Window${RESET}"
+    echo ""
+    echo -n -e "  ${WHITE}Name ${DIM}(optional)${RESET}: "
+    read -r name
+    echo -n -e "  ${WHITE}Description ${DIM}(optional)${RESET}: "
+    read -r desc
+
+    ensure_hive_session
+    if [[ -n "$name" ]]; then
+        tmux new-window -t "$HIVE_SESSION" -n "$name"
+    else
+        tmux new-window -t "$HIVE_SESSION"
+        name=$(tmux display-message -t "$HIVE_SESSION" -p '#W' 2>/dev/null || echo "window")
+    fi
+
+    if [[ -n "$desc" ]]; then
+        set_window_meta "$HIVE_SESSION:$name" "$desc"
+    fi
+
+    tput civis 2>/dev/null || true
+}
+
+_tui_action_describe() {
+    local sel=$1
+    local line="${windows[$sel]}"
+    IFS='|' read -r idx name active panes cmd desc is_current <<< "$line"
+
+    tput cnorm 2>/dev/null || true
+    echo -ne "\033[2J\033[H"
+    echo ""
+    echo -e "  ${HONEY}${BOLD}◆ Describe: ${name}${RESET}"
+    if [[ -n "$desc" ]]; then
+        echo -e "  ${DIM}Current: ${desc}${RESET}"
+    fi
+    echo ""
+    echo -n -e "  ${WHITE}Description: ${RESET}"
+    read -r new_desc
+
+    if [[ -n "$new_desc" ]]; then
+        set_window_meta "$HIVE_SESSION:$name" "$new_desc"
+    fi
+
+    tput civis 2>/dev/null || true
+}
+
+_tui_action_rename() {
+    local sel=$1
+    local line="${windows[$sel]}"
+    IFS='|' read -r idx name active panes cmd desc is_current <<< "$line"
+
+    tput cnorm 2>/dev/null || true
+    echo -ne "\033[2J\033[H"
+    echo ""
+    echo -e "  ${HONEY}${BOLD}◆ Rename: ${name}${RESET}"
+    echo ""
+    echo -n -e "  ${WHITE}New name: ${RESET}"
+    read -r new_name
+
+    if [[ -n "$new_name" ]]; then
+        local old_desc
+        old_desc=$(get_window_meta "$HIVE_SESSION:$name")
+        tmux rename-window -t "$HIVE_SESSION:$idx" "$new_name"
+        if [[ -n "$old_desc" ]]; then
+            set_window_meta "$HIVE_SESSION:$new_name" "$old_desc"
+        fi
+    fi
+
+    tput civis 2>/dev/null || true
+}
+
+_tui_action_close() {
+    local sel=$1
+    local line="${windows[$sel]}"
+    IFS='|' read -r idx name active panes cmd desc is_current <<< "$line"
+
+    tput cnorm 2>/dev/null || true
+    echo -ne "\033[2J\033[H"
+    echo ""
+    echo -e "  ${RED}${BOLD}✕ Close: ${name}${RESET}"
+    if [[ -n "$desc" ]]; then
+        echo -e "  ${DIM}${desc}${RESET}"
+    fi
+    echo ""
+    echo -n -e "  ${WHITE}Are you sure? ${DIM}(y/N)${RESET} "
+    read -rsn1 confirm
+
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        tmux kill-window -t "$HIVE_SESSION:$idx" 2>/dev/null || true
+    fi
+
+    tput civis 2>/dev/null || true
+}
+
+# ── Status Line (for tmux status bar) ────────────────────────
+
+cmd__status_line() {
+    if ! tmux has-session -t "$HIVE_SESSION" 2>/dev/null; then
+        echo ""
+        return
+    fi
+    local clients
+    clients=$(count_attached)
+    local windows
+    windows=$(tmux list-windows -t "$HIVE_SESSION" 2>/dev/null | wc -l | tr -d ' ')
+    echo "${clients}⚡ ${windows}◆"
+}
+
+# ── Status Command ────────────────────────────────────────────
+
+cmd_status() {
+    load_config
+    echo ""
+
+    local role="${HIVE_ROLE:-not configured}"
+    local role_icon="${SYM_LINK}"
+    local role_color="${BLUE}"
+
+    if [[ "$role" == "core" ]]; then
+        role_icon="${SYM_CORE}"
+        role_color="${HONEY}"
+    fi
+
+    echo -e "  ${!role_color}${role_icon}${RESET} ${BOLD}${HIVE_MACHINE_NAME:-$(hostname -s)}${RESET} ${DIM}(${role})${RESET}"
+    echo ""
+
+    if [[ "$role" == "core" ]]; then
+        if tmux has-session -t "$HIVE_SESSION" 2>/dev/null; then
+            local clients
+            clients=$(count_attached)
+            local win_count
+            win_count=$(tmux list-windows -t "$HIVE_SESSION" 2>/dev/null | wc -l | tr -d ' ')
+            echo -e "  ${GREEN}${SYM_ACTIVE}${RESET} Hive session active"
+            echo -e "  ${DIM}Windows:${RESET} ${win_count}  ${DIM}Connected:${RESET} ${clients}"
+        else
+            echo -e "  ${RED}${SYM_EMPTY}${RESET} No hive session"
+        fi
+    elif [[ "$role" == "link" ]]; then
+        echo -e "  ${DIM}Core:${RESET} ${HIVE_CORE_USER}@${HIVE_CORE_HOST}"
+        echo -n -e "  ${DIM}Connection:${RESET} "
+        if ssh -o ConnectTimeout=3 -o BatchMode=yes hive-core "echo ok" &>/dev/null; then
+            echo -e "${GREEN}reachable${RESET}"
+        else
+            echo -e "${RED}unreachable${RESET}"
+        fi
+    else
+        echo -e "  ${AMBER}Not configured.${RESET} Run ${HONEY}hive init core${RESET} or ${HONEY}hive init link${RESET}"
+    fi
+    echo ""
+}
+
+# ── Shell Integration ─────────────────────────────────────────
+
+cmd_shell_init() {
+    # Output shell code to source in .zshrc / .bashrc
+    local shell="${1:-zsh}"
+    cat << 'SHELL'
+# hive shell integration
+# Add to your .zshrc or .bashrc
+
+# Auto-connect: uncomment to SSH to core on every new tab (link machines)
+# if [[ $- == *i* ]] && [[ -z "$SSH_CONNECTION" ]] && [[ -z "$TMUX" ]]; then
+#     hive_role=$(grep HIVE_ROLE ~/.hive/config 2>/dev/null | cut -d'"' -f2)
+#     if [[ "$hive_role" == "link" ]]; then
+#         exec hive connect
+#     fi
+# fi
+
+# Auto-attach: uncomment to join hive tmux on every new tab (core machine)
+# if [[ $- == *i* ]] && [[ -z "$TMUX" ]]; then
+#     hive_role=$(grep HIVE_ROLE ~/.hive/config 2>/dev/null | cut -d'"' -f2)
+#     if [[ "$hive_role" == "core" ]]; then
+#         exec hive connect
+#     fi
+# fi
+
+# Alias
+alias h="hive"
+alias hl="hive ls"
+alias hn="hive new"
+alias ht="hive tag"
+SHELL
+}
+
+# ── Self-Update ───────────────────────────────────────────────
+
+_version_gt() {
+    # Returns 0 if $1 > $2 (version strings like "0.2.0" > "0.1.0")
+    local IFS='.'
+    local -a v1=($1) v2=($2)
+    local i
+    for (( i=0; i<${#v1[@]} || i<${#v2[@]}; i++ )); do
+        local a="${v1[i]:-0}"
+        local b="${v2[i]:-0}"
+        if (( a > b )); then
+            return 0
+        elif (( a < b )); then
+            return 1
+        fi
+    done
+    return 1  # equal
+}
+
+cmd_update() {
+    local check_only=0
+    if [[ "${1:-}" == "--check" ]]; then
+        check_only=1
+    fi
+
+    echo -e "\n${HONEY}${SYM_HIVE} hive update${RESET}\n"
+    echo -e "  ${DIM}Current version: v${VERSION}${RESET}"
+
+    # Fetch remote version (first 15 lines)
+    local remote_head
+    remote_head=$(curl -fsSL "$HIVE_RAW_URL" 2>/dev/null | head -n 15) || {
+        echo -e "  ${RED}✗${RESET} Failed to check for updates"
+        exit 1
+    }
+
+    local remote_version
+    remote_version=$(echo "$remote_head" | grep -m1 '^VERSION=' | sed 's/VERSION="//' | sed 's/"//')
+
+    if [[ -z "$remote_version" ]]; then
+        echo -e "  ${RED}✗${RESET} Could not determine remote version"
+        exit 1
+    fi
+
+    echo -e "  ${DIM}Latest version:  v${remote_version}${RESET}"
+
+    if _version_gt "$remote_version" "$VERSION"; then
+        echo -e "\n  ${GREEN}New version available:${RESET} v${VERSION} → ${HONEY}v${remote_version}${RESET}"
+
+        if [[ "$check_only" -eq 1 ]]; then
+            echo -e "  ${DIM}Run ${RESET}${HONEY}hive update${RESET}${DIM} to install${RESET}\n"
+            return
+        fi
+
+        # Download full script to temp file
+        local tmpfile
+        tmpfile=$(mktemp)
+        trap "rm -f '$tmpfile'" EXIT
+
+        if ! curl -fsSL "$HIVE_RAW_URL" -o "$tmpfile" 2>/dev/null; then
+            echo -e "  ${RED}✗${RESET} Failed to download update"
+            exit 1
+        fi
+
+        # Sanity checks
+        if ! head -n 1 "$tmpfile" | grep -q '^#!/usr/bin/env bash'; then
+            echo -e "  ${RED}✗${RESET} Downloaded file doesn't look like a valid hive script"
+            exit 1
+        fi
+        if ! grep -q 'VERSION=' "$tmpfile"; then
+            echo -e "  ${RED}✗${RESET} Downloaded file is missing VERSION"
+            exit 1
+        fi
+
+        # Replace the running script
+        local self
+        self=$(realpath "${BASH_SOURCE[0]}" 2>/dev/null || readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")
+        cp "$tmpfile" "$self"
+        chmod +x "$self"
+
+        echo -e "  ${GREEN}✓${RESET} Updated: v${VERSION} → ${HONEY}v${remote_version}${RESET}\n"
+    else
+        echo -e "\n  ${GREEN}✓${RESET} Already up to date (v${VERSION})\n"
+    fi
+}
+
+# ── Help ──────────────────────────────────────────────────────
+
+cmd_help() {
+    echo -e "
+  ${HONEY}${BOLD}${SYM_HIVE} hive${RESET} ${DIM}v${VERSION}${RESET}
+  ${DIM}Seamless multi-machine terminal sessions${RESET}
+
+  ${BOLD}Setup${RESET}
+    ${HONEY}hive init core${RESET}              Setup this machine as the always-on core
+    ${HONEY}hive init link${RESET} ${DIM}[host] [user]${RESET}  Setup this machine as a link to core
+    ${HONEY}hive shell-init${RESET}             Print shell integration code
+
+  ${BOLD}Connect${RESET}
+    ${HONEY}hive${RESET}                        Smart connect — TUI picker or attach
+    ${HONEY}hive connect${RESET}                Connect to core (from link) or attach (on core)
+    ${HONEY}hive join${RESET}                   Interactive window picker
+
+  ${BOLD}Windows${RESET}
+    ${HONEY}hive ls${RESET}                     List all windows
+    ${HONEY}hive new${RESET} ${DIM}[name] [desc]${RESET}      Create a new window
+    ${HONEY}hive tag${RESET} ${DIM}\"description\"${RESET}      Describe the current window
+    ${HONEY}hive rename${RESET} ${DIM}<name>${RESET}           Rename the current window
+    ${HONEY}hive close${RESET} ${DIM}[window]${RESET}          Close a window
+
+  ${BOLD}Info${RESET}
+    ${HONEY}hive status${RESET}                 Show machine role and connection info
+    ${HONEY}hive update${RESET}                 Update hive to the latest version
+    ${HONEY}hive update --check${RESET}         Check for updates without installing
+    ${HONEY}hive help${RESET}                   This help
+
+  ${BOLD}tmux Keybindings${RESET} ${DIM}(inside hive session)${RESET}
+    ${HONEY}prefix + H${RESET}                  Open hive TUI as popup
+    ${HONEY}prefix + N${RESET}                  New named window
+    ${HONEY}prefix + D${RESET}                  Describe current window
+"
+}
+
+# ── Main Entry Point ──────────────────────────────────────────
+
+main() {
+    load_config
+    local cmd="${1:-}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        "")
+            # Smart default
+            if is_in_tmux; then
+                cmd_tui
+            else
+                cmd_connect
+            fi
+            ;;
+        init)
+            local role="${1:-}"
+            shift 2>/dev/null || true
+            case "$role" in
+                core) cmd_init_core "$@" ;;
+                link) cmd_init_link "$@" ;;
+                *)
+                    echo -e "${RED}Usage:${RESET} hive init ${HONEY}core${RESET}|${HONEY}link${RESET}"
+                    exit 1
+                    ;;
+            esac
+            ;;
+        connect)    cmd_connect "$@" ;;
+        join)       cmd_tui "$@" ;;
+        ls|list)    cmd_ls "$@" ;;
+        new)        cmd_new "$@" ;;
+        tag|desc|describe) cmd_tag "$@" ;;
+        rename)     cmd_rename "$@" ;;
+        close|kill) cmd_close "$@" ;;
+        status)     cmd_status "$@" ;;
+        update)     cmd_update "$@" ;;
+        shell-init) cmd_shell_init "$@" ;;
+        help|--help|-h) cmd_help ;;
+        version|--version|-v) echo "hive v${VERSION}" ;;
+        # Internal commands
+        _attach)       cmd__attach ;;
+        _tui)          _run_tui ;;
+        _tui_popup)    cmd__tui_popup ;;
+        _status_line)  cmd__status_line ;;
+        *)
+            echo -e "${RED}Unknown command:${RESET} $cmd"
+            echo -e "Run ${HONEY}hive help${RESET} for usage."
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
