@@ -228,6 +228,7 @@ TMUXCONF
     fi
 
     # Create launchd agent
+    mkdir -p "$HOME/Library/LaunchAgents"
     local plist="$HOME/Library/LaunchAgents/com.hive.tmux.plist"
     local tmux_path
     tmux_path=$(which tmux)
