@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.6.0"
+VERSION="0.7.0"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
 HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
@@ -765,6 +765,100 @@ cmd_close() {
     fi
 }
 
+# ── Claude Code Auth ──────────────────────────────────────────
+
+cmd_auth() {
+    local subcmd="${1:-}"
+
+    case "$subcmd" in
+        setup)
+            echo -e "\n${HONEY}${SYM_HIVE} Claude Code auth setup${RESET}\n"
+            echo -e "  This will run ${HONEY}claude setup-token${RESET} to generate a long-lived token"
+            echo -e "  and store it so every hive tmux window can authenticate.\n"
+
+            if ! command -v claude &>/dev/null; then
+                echo -e "  ${RED}✗${RESET} Claude Code not found. Install it first."
+                return 1
+            fi
+
+            # Run setup-token and capture the output
+            local token
+            token=$(claude setup-token 2>&1) || true
+
+            if [[ "$token" == sk-ant-* ]]; then
+                echo -n "$token" > "$HIVE_DIR/claude-token"
+                chmod 600 "$HIVE_DIR/claude-token"
+                echo -e "  ${GREEN}✓${RESET} Token saved to ${DIM}~/.hive/claude-token${RESET}"
+                _apply_claude_token
+            else
+                echo -e "  ${AMBER}!${RESET} Could not capture token automatically."
+                echo -e "  ${DIM}Run ${RESET}${HONEY}claude setup-token${RESET}${DIM} manually, then:${RESET}"
+                echo -e "  ${HONEY}hive auth save <token>${RESET}"
+            fi
+            ;;
+        save)
+            local token="${2:-}"
+            if [[ -z "$token" ]]; then
+                echo -e "${RED}Error:${RESET} Token required. Usage: ${HONEY}hive auth save <token>${RESET}"
+                return 1
+            fi
+            echo -n "$token" > "$HIVE_DIR/claude-token"
+            chmod 600 "$HIVE_DIR/claude-token"
+            echo -e "${GREEN}✓${RESET} Token saved to ${DIM}~/.hive/claude-token${RESET}"
+            _apply_claude_token
+            ;;
+        status)
+            echo -e "\n${HONEY}${SYM_HIVE} Claude Code auth status${RESET}\n"
+            if [[ -f "$HIVE_DIR/claude-token" ]]; then
+                local token
+                token=$(cat "$HIVE_DIR/claude-token")
+                echo -e "  ${GREEN}✓${RESET} Token file exists ${DIM}(${#token} chars)${RESET}"
+            else
+                echo -e "  ${AMBER}!${RESET} No token file. Run ${HONEY}hive auth setup${RESET}"
+            fi
+            if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+                echo -e "  ${GREEN}✓${RESET} CLAUDE_CODE_OAUTH_TOKEN is set in environment"
+            else
+                echo -e "  ${AMBER}!${RESET} CLAUDE_CODE_OAUTH_TOKEN not in current shell"
+                echo -e "  ${DIM}New tmux windows will pick it up automatically${RESET}"
+            fi
+            if command -v claude &>/dev/null; then
+                local auth_status
+                auth_status=$(claude auth status 2>&1 | head -1)
+                echo -e "  ${DIM}Claude CLI: ${auth_status}${RESET}"
+            fi
+            echo ""
+            ;;
+        *)
+            echo -e "\n${HONEY}${SYM_HIVE} Claude Code auth${RESET}\n"
+            echo -e "  ${HONEY}hive auth setup${RESET}          Generate and save a long-lived token"
+            echo -e "  ${HONEY}hive auth save <token>${RESET}   Save a token manually"
+            echo -e "  ${HONEY}hive auth status${RESET}         Check auth status\n"
+            ;;
+    esac
+}
+
+_apply_claude_token() {
+    # Add to tmux config if not already present
+    local tmux_conf="$HIVE_DIR/tmux.conf"
+    if [[ -f "$tmux_conf" ]] && ! grep -q "CLAUDE_CODE_OAUTH_TOKEN" "$tmux_conf" 2>/dev/null; then
+        cat >> "$tmux_conf" << 'CLAUDEAUTH'
+
+# Claude Code auth token — bypasses macOS Keychain ACL issues in tmux
+run-shell 'tmux setenv -g CLAUDE_CODE_OAUTH_TOKEN "$(cat ~/.hive/claude-token 2>/dev/null)"'
+CLAUDEAUTH
+        echo -e "${GREEN}✓${RESET} Added token to tmux config"
+    fi
+
+    # Apply immediately if tmux is running
+    if tmux info &>/dev/null 2>&1; then
+        local token
+        token=$(cat "$HIVE_DIR/claude-token")
+        tmux setenv -g CLAUDE_CODE_OAUTH_TOKEN "$token"
+        echo -e "${GREEN}✓${RESET} Token applied to running tmux server"
+    fi
+}
+
 # ── SSH Agent Fix ──────────────────────────────────────────────
 
 cmd_fixssh() {
@@ -1323,6 +1417,11 @@ cmd_help() {
     ${HONEY}hive rename${RESET} ${DIM}<name>${RESET}           Rename the current window
     ${HONEY}hive close${RESET} ${DIM}[window]${RESET}          Close a window
 
+  ${BOLD}Auth${RESET}
+    ${HONEY}hive auth setup${RESET}             Setup Claude Code auth for tmux sessions
+    ${HONEY}hive auth save${RESET} ${DIM}<token>${RESET}       Save a token manually
+    ${HONEY}hive auth status${RESET}            Check Claude Code auth status
+
   ${BOLD}Info${RESET}
     ${HONEY}hive status${RESET}                 Show machine role and connection info
     ${HONEY}hive fixssh${RESET}                 Fix stale SSH agent socket in tmux
@@ -1376,6 +1475,7 @@ main() {
         tag|desc|describe) cmd_tag "$@" ;;
         rename)     cmd_rename "$@" ;;
         close|kill) cmd_close "$@" ;;
+        auth)       cmd_auth "$@" ;;
         fixssh)     cmd_fixssh "$@" ;;
         status)     cmd_status "$@" ;;
         update)     cmd_update "$@" ;;
