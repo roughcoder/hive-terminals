@@ -16,6 +16,7 @@ HIVE_DIR="$HOME/.hive"
 HIVE_CONFIG="$HIVE_DIR/config"
 HIVE_SESSION="hive"
 HIVE_META_DIR="$HIVE_DIR/meta"
+HIVE_REMOTE_PREFIX='PATH="$HOME/.local/bin:$PATH"'
 
 # ── Colors & Symbols ──────────────────────────────────────────
 
@@ -345,8 +346,8 @@ SSHCONF
     if ssh -o ConnectTimeout=5 -o BatchMode=yes hive-core "echo ok" &>/dev/null; then
         echo -e "  ${GREEN}✓${RESET} Connection successful!"
 
-        # Check if hive is on the core
-        if ssh hive-core "command -v hive" &>/dev/null; then
+        # Check if hive is on the core (use full path since non-interactive SSH may lack ~/.local/bin in PATH)
+        if ssh hive-core "command -v hive || test -x \$HOME/.local/bin/hive" &>/dev/null; then
             echo -e "  ${GREEN}✓${RESET} Hive found on core"
         else
             echo -e "  ${AMBER}!${RESET} Hive not found on core — install it there too with ${HONEY}hive init core${RESET}"
@@ -399,7 +400,7 @@ cmd_connect() {
     fi
 
     # SSH to core and run hive there
-    local remote_cmd="hive _attach"
+    local remote_cmd="${HIVE_REMOTE_PREFIX} hive _attach"
     exec ssh hive-core -t "$remote_cmd"
 }
 
@@ -447,13 +448,13 @@ cmd_new() {
         echo -e "${GREEN}✓${RESET} Created window ${HONEY}${name}${RESET}"
     else
         # On a link, run remotely
-        ssh hive-core "hive new '$name' '$desc'"
+        ssh hive-core "${HIVE_REMOTE_PREFIX} hive new '$name' '$desc'"
     fi
 }
 
 cmd_ls() {
     if is_link && ! is_in_tmux; then
-        ssh hive-core "hive ls"
+        ssh hive-core "${HIVE_REMOTE_PREFIX} hive ls"
         return
     fi
 
@@ -512,7 +513,7 @@ cmd_tag() {
         set_window_meta "$HIVE_SESSION:$window_name" "$desc"
         echo -e "${GREEN}✓${RESET} Tagged ${HONEY}${window_name}${RESET} — ${ITALIC}${desc}${RESET}"
     elif is_link; then
-        ssh hive-core "hive tag '$desc'"
+        ssh hive-core "${HIVE_REMOTE_PREFIX} hive tag '$desc'"
     else
         echo -e "${RED}Error:${RESET} Must be inside a hive session or specify a window."
         return 1
@@ -544,7 +545,7 @@ cmd_rename() {
         fi
         echo -e "${GREEN}✓${RESET} Renamed ${DIM}${old_name}${RESET} → ${HONEY}${new_name}${RESET}"
     elif is_link; then
-        ssh hive-core "hive rename '$new_name'"
+        ssh hive-core "${HIVE_REMOTE_PREFIX} hive rename '$new_name'"
     else
         echo -e "${RED}Error:${RESET} Must be inside a hive session."
         return 1
@@ -568,7 +569,7 @@ cmd_close() {
         tmux kill-window -t "$HIVE_SESSION:$target"
         echo -e "${GREEN}✓${RESET} Closed window ${DIM}${target}${RESET}"
     elif is_link; then
-        ssh hive-core "hive close '$target'"
+        ssh hive-core "${HIVE_REMOTE_PREFIX} hive close '$target'"
     else
         echo -e "${RED}Error:${RESET} Must be inside a hive session or specify a window."
     fi
@@ -578,7 +579,7 @@ cmd_close() {
 
 cmd_tui() {
     if is_link && ! is_in_tmux; then
-        ssh hive-core -t "hive _tui"
+        ssh hive-core -t "${HIVE_REMOTE_PREFIX} hive _tui"
         return
     fi
 
