@@ -985,15 +985,18 @@ cmd_update() {
     echo -e "\n${HONEY}${SYM_HIVE} hive update${RESET}\n"
     echo -e "  ${DIM}Current version: v${VERSION}${RESET}"
 
-    # Fetch remote script and extract version
-    local remote_content
-    remote_content=$(curl -fsSL "$HIVE_RAW_URL" 2>/dev/null) || {
+    # Download remote script to temp file
+    local tmpfile
+    tmpfile=$(mktemp)
+    trap "rm -f '$tmpfile'" EXIT
+
+    if ! curl -fsSL "$HIVE_RAW_URL" -o "$tmpfile" 2>/dev/null; then
         echo -e "  ${RED}✗${RESET} Failed to check for updates"
         exit 1
-    }
+    fi
 
     local remote_version
-    remote_version=$(echo "$remote_content" | grep -m1 '^VERSION=' | sed 's/VERSION="//' | sed 's/"//')
+    remote_version=$(grep -m1 '^VERSION=' "$tmpfile" | sed 's/VERSION="//' | sed 's/"//')
 
     if [[ -z "$remote_version" ]]; then
         echo -e "  ${RED}✗${RESET} Could not determine remote version"
@@ -1009,12 +1012,6 @@ cmd_update() {
             echo -e "  ${DIM}Run ${RESET}${HONEY}hive update${RESET}${DIM} to install${RESET}\n"
             return
         fi
-
-        # Write already-fetched content to temp file
-        local tmpfile
-        tmpfile=$(mktemp)
-        trap "rm -f '$tmpfile'" EXIT
-        echo "$remote_content" > "$tmpfile"
 
         # Sanity checks
         if ! head -n 1 "$tmpfile" | grep -q '^#!/usr/bin/env bash'; then
