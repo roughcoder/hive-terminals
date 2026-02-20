@@ -6,7 +6,8 @@ set -euo pipefail
 
 INSTALL_DIR="$HOME/.local/bin"
 HIVE_REPO="roughcoder/hive-terminals"
-HIVE_RAW_URL="https://raw.githubusercontent.com/${HIVE_REPO}/main/hive"
+HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
+HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
 
 BOLD="\033[1m"
 RESET="\033[0m"
@@ -40,7 +41,7 @@ if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/hive" ]]; then
     echo -e "  ${GREEN}✓${RESET} Installed from local repo"
 else
     echo -e "  ${DIM}Downloading hive from GitHub...${RESET}"
-    if curl -fsSL "$HIVE_RAW_URL?cb=$(date +%s)" -o "$INSTALL_DIR/hive"; then
+    if curl "${HIVE_CURL_OPTS[@]}" "$HIVE_RAW_URL" -o "$INSTALL_DIR/hive"; then
         echo -e "  ${GREEN}✓${RESET} Downloaded from GitHub"
     else
         echo -e "  ${RED}✗${RESET} Failed to download hive from GitHub"
