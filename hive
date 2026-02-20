@@ -936,7 +936,7 @@ cmd_code() {
 
         if [[ -n "$link_host" ]]; then
             echo -e "${HONEY}${SYM_HIVE}${RESET} Opening ${HONEY}${path}${RESET} in VS Code on ${DIM}${link_host}${RESET}..."
-            ssh -o ConnectTimeout=5 -o BatchMode=yes "$link_host" "code --remote ssh-remote+hive-core '${path}'" 2>/dev/null
+            ssh -o ConnectTimeout=5 -o BatchMode=yes "$link_host" "PATH=/usr/local/bin:/opt/homebrew/bin:\$PATH code --remote ssh-remote+hive-core '${path}'" 2>/dev/null
         else
             echo -e "${HONEY}${SYM_HIVE}${RESET} Opening ${HONEY}${path}${RESET} in VS Code..."
             code "$path"
@@ -1326,7 +1326,7 @@ _tui_action_code() {
     if [[ -n "$link_host" ]]; then
         # SSH back to link machine and open VS Code directly
         echo -e "  ${DIM}Opening on ${link_host}...${RESET}"
-        if ssh -o ConnectTimeout=5 -o BatchMode=yes "$link_host" "code --remote ssh-remote+hive-core '${path}'" 2>/dev/null; then
+        if ssh -o ConnectTimeout=5 -o BatchMode=yes "$link_host" "PATH=/usr/local/bin:/opt/homebrew/bin:\$PATH code --remote ssh-remote+hive-core '${path}'" 2>/dev/null; then
             echo -e "  ${GREEN}✓${RESET} VS Code opened"
         else
             echo -e "  ${RED}✗${RESET} Could not reach ${link_host}"
