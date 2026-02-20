@@ -993,7 +993,7 @@ cmd_update() {
     tmpfile=$(mktemp)
     trap "rm -f '$tmpfile'" EXIT
 
-    if ! curl -fsSL "$HIVE_RAW_URL" -o "$tmpfile" 2>/dev/null; then
+    if ! curl -fsSL "$HIVE_RAW_URL?cb=$(date +%s)" -o "$tmpfile" 2>/dev/null; then
         echo -e "  ${RED}✗${RESET} Failed to check for updates"
         exit 1
     fi

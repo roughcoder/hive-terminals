@@ -40,7 +40,7 @@ if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/hive" ]]; then
     echo -e "  ${GREEN}✓${RESET} Installed from local repo"
 else
     echo -e "  ${DIM}Downloading hive from GitHub...${RESET}"
-    if curl -fsSL "$HIVE_RAW_URL" -o "$INSTALL_DIR/hive"; then
+    if curl -fsSL "$HIVE_RAW_URL?cb=$(date +%s)" -o "$INSTALL_DIR/hive"; then
         echo -e "  ${GREEN}✓${RESET} Downloaded from GitHub"
     else
         echo -e "  ${RED}✗${RESET} Failed to download hive from GitHub"
