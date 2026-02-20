@@ -310,7 +310,7 @@ Host hive-core
     HostName ${core_host}
     User ${core_user}
     ServerAliveInterval 30
-    ServerAliveCountdown 3
+    ServerAliveCountMax 3
     RequestTTY yes
     # Fast reconnection
     ControlMaster auto
@@ -329,7 +329,7 @@ Host hive-core
     HostName ${core_host}
     User ${core_user}
     ServerAliveInterval 30
-    ServerAliveCountdown 3
+    ServerAliveCountMax 3
     RequestTTY yes
     ControlMaster auto
     ControlPath ~/.ssh/hive-%r@%h:%p
