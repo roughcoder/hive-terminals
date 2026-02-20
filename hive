@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.2.2"
+VERSION="0.2.3"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
 HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
@@ -1052,6 +1052,7 @@ cmd_update() {
         chmod +x "$self"
 
         echo -e "  ${GREEN}✓${RESET} Updated: v${VERSION} → ${HONEY}v${remote_version}${RESET}\n"
+        exit 0
     else
         echo -e "\n  ${GREEN}✓${RESET} Already up to date (v${VERSION})\n"
     fi
