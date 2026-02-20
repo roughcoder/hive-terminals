@@ -564,6 +564,9 @@ cmd_close() {
             tmux kill-window
             echo -e "${GREEN}✓${RESET} Closed ${DIM}${name}${RESET}"
         fi
+    elif is_core && [[ -n "$target" ]]; then
+        tmux kill-window -t "$HIVE_SESSION:$target"
+        echo -e "${GREEN}✓${RESET} Closed window ${DIM}${target}${RESET}"
     elif is_link; then
         ssh hive-core "hive close '$target'"
     else
@@ -896,7 +899,7 @@ cmd_status() {
         role_color="${HONEY}"
     fi
 
-    echo -e "  ${!role_color}${role_icon}${RESET} ${BOLD}${HIVE_MACHINE_NAME:-$(hostname -s)}${RESET} ${DIM}(${role})${RESET}"
+    echo -e "  ${role_color}${role_icon}${RESET} ${BOLD}${HIVE_MACHINE_NAME:-$(hostname -s)}${RESET} ${DIM}(${role})${RESET}"
     echo ""
 
     if [[ "$role" == "core" ]]; then
