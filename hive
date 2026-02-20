@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
 HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
@@ -434,7 +434,22 @@ cmd_new() {
     local name="${1:-}"
     local desc="${2:-}"
 
-    if is_core || is_in_tmux; then
+    if is_in_tmux; then
+        # Inside tmux: create window in current session (works for both core and grouped link sessions)
+        if [[ -n "$name" ]]; then
+            tmux new-window -n "$name"
+        else
+            tmux new-window
+            name=$(tmux display-message -p '#W')
+        fi
+
+        if [[ -n "$desc" ]]; then
+            set_window_meta "$HIVE_SESSION:$name" "$desc"
+        fi
+
+        echo -e "${GREEN}✓${RESET} Created window ${HONEY}${name}${RESET}"
+    elif is_core; then
+        # On core but outside tmux
         ensure_hive_session
 
         if [[ -n "$name" ]]; then
@@ -448,16 +463,9 @@ cmd_new() {
             set_window_meta "$HIVE_SESSION:$name" "$desc"
         fi
 
-        # If in tmux, switch to the new window in the current session (not the main hive session)
-        if is_in_tmux; then
-            local idx
-            idx=$(tmux list-windows -t "$HIVE_SESSION" -F '#{window_name}|#{window_index}' | grep "^${name}|" | cut -d'|' -f2)
-            tmux select-window -t ":$idx" 2>/dev/null || true
-        fi
-
         echo -e "${GREEN}✓${RESET} Created window ${HONEY}${name}${RESET}"
     else
-        # On a link, run remotely
+        # On a link outside tmux, run remotely
         ssh hive-core "${HIVE_REMOTE_PREFIX} hive new '$name' '$desc'"
     fi
 }
