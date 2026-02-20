@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.4.0"
+VERSION="0.5.0"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
 HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
@@ -285,6 +285,25 @@ PLIST
     ensure_hive_session
     echo -e "  ${GREEN}✓${RESET} Hive session created"
 
+    # Session persistence plugins
+    if ! grep -q 'resurrect' "$tmux_conf" 2>/dev/null; then
+        cat >> "$tmux_conf" << 'PLUGINCONF'
+
+# Session persistence (resurrect + continuum)
+set -g @resurrect-dir '~/.hive/resurrect'
+set -g @resurrect-capture-pane-contents 'on'
+set -g @continuum-restore 'on'
+set -g @continuum-save-interval '15'
+set -g @resurrect-hook-post-restore-all 'hive _restore_meta'
+
+# Plugins (must be at very end)
+run-shell ~/.hive/plugins/tmux-resurrect/resurrect.tmux
+run-shell ~/.hive/plugins/tmux-continuum/continuum.tmux
+PLUGINCONF
+        echo -e "  ${GREEN}✓${RESET} Added session persistence config"
+    fi
+    cmd_setup_plugins
+
     # Copy hive to path
     _ensure_in_path
 
@@ -394,6 +413,23 @@ _ensure_in_path() {
     if [[ ":$PATH:" != *":$install_dir:"* ]]; then
         echo -e "  ${AMBER}!${RESET} Add to your PATH: ${DIM}export PATH=\"\$HOME/.local/bin:\$PATH\"${RESET}"
     fi
+}
+
+# ── Plugin Management ─────────────────────────────────────────
+
+cmd_setup_plugins() {
+    local plugin_dir="$HIVE_DIR/plugins"
+    mkdir -p "$plugin_dir"
+
+    for plugin in tmux-resurrect tmux-continuum; do
+        if [[ -d "$plugin_dir/$plugin" ]]; then
+            echo -e "  ${DIM}~${RESET} $plugin already installed"
+        else
+            echo -e "  ${DIM}Installing $plugin...${RESET}"
+            git clone "https://github.com/tmux-plugins/$plugin" "$plugin_dir/$plugin" 2>/dev/null
+            echo -e "  ${GREEN}✓${RESET} Installed $plugin"
+        fi
+    done
 }
 
 # ── Connect (Link → Core) ────────────────────────────────────
@@ -954,6 +990,25 @@ cmd__status_line() {
     echo "${clients}⚡ ${windows}◆"
 }
 
+# ── Post-Restore Hook ─────────────────────────────────────────
+
+cmd__restore_meta() {
+    # Re-apply @hive_desc from ~/.hive/meta/ files after tmux-resurrect restore
+    if ! tmux has-session -t "$HIVE_SESSION" 2>/dev/null; then
+        return
+    fi
+    while IFS='|' read -r idx name; do
+        local safe_name
+        safe_name=$(echo "${HIVE_SESSION}:${name}" | tr ':/' '__')
+        local meta_file="$HIVE_META_DIR/$safe_name"
+        if [[ -f "$meta_file" ]]; then
+            local desc
+            desc=$(cat "$meta_file")
+            tmux set-option -wq -t "$HIVE_SESSION:$idx" @hive_desc "$desc" 2>/dev/null || true
+        fi
+    done < <(tmux list-windows -t "$HIVE_SESSION" -F '#{window_index}|#{window_name}' 2>/dev/null)
+}
+
 # ── Status Command ────────────────────────────────────────────
 
 cmd_status() {
@@ -1140,6 +1195,10 @@ cmd_help() {
     ${HONEY}hive update --check${RESET}         Check for updates without installing
     ${HONEY}hive help${RESET}                   This help
 
+  ${BOLD}Session Persistence${RESET}
+    ${DIM}Sessions auto-save every 15 min and restore on tmux restart${RESET}
+    ${DIM}Powered by tmux-resurrect + tmux-continuum (installed via init core)${RESET}
+
   ${BOLD}tmux Keybindings${RESET} ${DIM}(inside hive session)${RESET}
     ${HONEY}prefix + H${RESET}                  Open hive TUI as popup
     ${HONEY}prefix + N${RESET}                  New named window
@@ -1193,6 +1252,7 @@ main() {
         _tui)          _run_tui ;;
         _tui_popup)    cmd__tui_popup ;;
         _status_line)  cmd__status_line ;;
+        _restore_meta) cmd__restore_meta ;;
         *)
             echo -e "${RED}Unknown command:${RESET} $cmd"
             echo -e "Run ${HONEY}hive help${RESET} for usage."
