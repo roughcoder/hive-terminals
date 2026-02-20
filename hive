@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.2.3"
+VERSION="0.3.0"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
 HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
@@ -423,8 +423,12 @@ cmd__attach() {
 
 _attach_new_view() {
     local client_id="hive-link-$$"
+    # Clear any TUI traps so cleanup escape sequences don't interfere with tmux
+    trap - EXIT INT TERM
     # Create a grouped session that shares windows with main hive session
     tmux new-session -d -t "$HIVE_SESSION" -s "$client_id" 2>/dev/null || true
+    # Create a fresh window for this connection so each link gets independent content
+    tmux new-window -t "$client_id"
     exec tmux attach-session -t "$client_id" \; set-option destroy-unattached on
 }
 
@@ -788,7 +792,12 @@ _tui_action_join() {
     if is_in_tmux; then
         tmux select-window -t ":$idx"
     else
-        _attach_new_view
+        # Attach to tmux and switch to the selected window
+        local client_id="hive-link-$$"
+        trap - EXIT INT TERM
+        tmux new-session -d -t "$HIVE_SESSION" -s "$client_id" 2>/dev/null || true
+        tmux select-window -t "$client_id:$idx" 2>/dev/null || true
+        exec tmux attach-session -t "$client_id" \; set-option destroy-unattached on
     fi
 }
 
