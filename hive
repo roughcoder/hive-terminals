@@ -689,7 +689,7 @@ _tui_read_key() {
 
     case "$key" in
         $'\x1b')
-            read -rsn2 -t 0.1 key || true
+            read -rsn2 -t 1 key || true
             case "$key" in
                 '[A') REPLY="UP" ;;
                 '[B') REPLY="DOWN" ;;
