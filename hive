@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.9.1"
+VERSION="0.9.2"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
 HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
@@ -292,6 +292,8 @@ cmd_init_core() {
 set -g default-terminal "tmux-256color"
 set -ag terminal-overrides ",xterm-256color:RGB"
 set -g mouse on
+set -g extended-keys on
+set -as terminal-features ",*:extkeys"
 set -g history-limit 50000
 set -g base-index 1
 setw -g pane-base-index 1
@@ -322,6 +324,9 @@ bind-key H run-shell "hive _tui_popup"
 bind-key N command-prompt -p "Window name:" "run-shell 'hive new \"%%\"'"
 bind-key D command-prompt -p "Description:" "run-shell 'hive tag \"%%\"'"
 bind-key V run-shell "hive code"
+
+# Pass Shift+Enter through to applications (e.g. Claude Code multi-line input)
+bind -n S-Enter send-keys Escape "[13;2u"
 TMUXCONF
         echo -e "  ${GREEN}✓${RESET} Created tmux config at ${DIM}${tmux_conf}${RESET}"
     fi
