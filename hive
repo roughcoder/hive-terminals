@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.7.0"
+VERSION="0.8.0"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
 HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
@@ -321,6 +321,7 @@ setenv -g SSH_AUTH_SOCK $HOME/.ssh/ssh_auth_sock
 bind-key H run-shell "hive _tui_popup"
 bind-key N command-prompt -p "Window name:" "run-shell 'hive new \"%%\"'"
 bind-key D command-prompt -p "Description:" "run-shell 'hive tag \"%%\"'"
+bind-key V run-shell "hive code"
 TMUXCONF
         echo -e "  ${GREEN}✓${RESET} Created tmux config at ${DIM}${tmux_conf}${RESET}"
     fi
@@ -859,6 +860,74 @@ CLAUDEAUTH
     fi
 }
 
+# ── VS Code Remote ────────────────────────────────────────────
+
+cmd_code() {
+    local target="${1:-}"
+    load_config
+
+    if is_link; then
+        # Get working directory from core
+        local remote_path
+        if [[ -n "$target" ]]; then
+            remote_path=$(ssh hive-core "${HIVE_REMOTE_PREFIX} hive _pane_path '$target'" 2>/dev/null)
+        else
+            remote_path=$(ssh hive-core "${HIVE_REMOTE_PREFIX} hive _pane_path" 2>/dev/null)
+        fi
+
+        if [[ -z "$remote_path" ]]; then
+            echo -e "${RED}Error:${RESET} Could not get working directory from core"
+            return 1
+        fi
+
+        echo -e "${HONEY}${SYM_HIVE}${RESET} Opening ${HONEY}${remote_path}${RESET} in VS Code..."
+        code --remote "ssh-remote+hive-core" "$remote_path"
+    elif is_core; then
+        local path
+        if is_in_tmux; then
+            if [[ -n "$target" ]]; then
+                path=$(_get_pane_path "$target")
+            else
+                path=$(tmux display-message -p '#{pane_current_path}' 2>/dev/null)
+            fi
+        elif [[ -n "$target" ]]; then
+            path=$(_get_pane_path "$target")
+        else
+            echo -e "${RED}Error:${RESET} Specify a window name or run from inside tmux"
+            return 1
+        fi
+
+        if [[ -n "$path" ]]; then
+            echo -e "${HONEY}${SYM_HIVE}${RESET} Opening ${HONEY}${path}${RESET} in VS Code..."
+            code "$path"
+        else
+            echo -e "${RED}Error:${RESET} Could not determine working directory"
+            return 1
+        fi
+    fi
+}
+
+# Internal: get the active pane's working directory for a window
+cmd__pane_path() {
+    local target="${1:-}"
+    _get_pane_path "$target"
+}
+
+_get_pane_path() {
+    local target="${1:-}"
+    if [[ -n "$target" ]]; then
+        # Find window by name
+        local idx
+        idx=$(tmux list-windows -t "$HIVE_SESSION" -F '#{window_name}|#{window_index}' 2>/dev/null | grep "^${target}|" | cut -d'|' -f2)
+        if [[ -n "$idx" ]]; then
+            tmux display-message -t "$HIVE_SESSION:$idx" -p '#{pane_current_path}' 2>/dev/null
+        fi
+    else
+        # Active window in the hive session
+        tmux display-message -t "$HIVE_SESSION" -p '#{pane_current_path}' 2>/dev/null
+    fi
+}
+
 # ── SSH Agent Fix ──────────────────────────────────────────────
 
 cmd_fixssh() {
@@ -972,6 +1041,9 @@ _run_tui() {
             r)
                 _tui_action_rename "$selected"
                 ;;
+            v)
+                _tui_action_code "$selected"
+                ;;
             x)
                 _tui_action_close "$selected"
                 ;;
@@ -1065,7 +1137,7 @@ _tui_draw() {
     # Footer
     echo ""
     echo -e "  ${DIM}$(printf '%.0s─' {1..50})${RESET}"
-    echo -e "  ${HONEY}↑↓${RESET} ${DIM}navigate${RESET}  ${HONEY}⏎${RESET} ${DIM}join${RESET}  ${HONEY}n${RESET} ${DIM}new${RESET}  ${HONEY}d${RESET} ${DIM}describe${RESET}  ${HONEY}r${RESET} ${DIM}rename${RESET}  ${HONEY}x${RESET} ${DIM}close${RESET}  ${HONEY}q${RESET} ${DIM}quit${RESET}"
+    echo -e "  ${HONEY}↑↓${RESET} ${DIM}navigate${RESET}  ${HONEY}⏎${RESET} ${DIM}join${RESET}  ${HONEY}n${RESET} ${DIM}new${RESET}  ${HONEY}d${RESET} ${DIM}describe${RESET}  ${HONEY}r${RESET} ${DIM}rename${RESET}  ${HONEY}v${RESET} ${DIM}vscode${RESET}  ${HONEY}x${RESET} ${DIM}close${RESET}  ${HONEY}q${RESET} ${DIM}quit${RESET}"
     echo ""
 }
 
@@ -1177,6 +1249,44 @@ _tui_action_rename() {
             set_window_meta "$HIVE_SESSION:$new_name" "$old_desc"
         fi
     fi
+
+    tput civis 2>/dev/null || true
+}
+
+_tui_action_code() {
+    local sel=$1
+    local line="${windows[$sel]}"
+    IFS='|' read -r idx name active panes cmd desc is_current <<< "$line"
+
+    local path
+    path=$(tmux display-message -t "$HIVE_SESSION:$idx" -p '#{pane_current_path}' 2>/dev/null)
+
+    if [[ -z "$path" ]]; then
+        return
+    fi
+
+    local vscode_cmd="code --remote ssh-remote+hive-core ${path}"
+
+    # Try OSC 52 clipboard copy (works through tmux → SSH → iTerm2)
+    local encoded
+    encoded=$(printf '%s' "$vscode_cmd" | base64 | tr -d '\n')
+    printf '\033]52;c;%s\a' "$encoded"
+
+    # Also set tmux buffer as fallback
+    tmux set-buffer "$vscode_cmd" 2>/dev/null || true
+
+    tput cnorm 2>/dev/null || true
+    echo -ne "\033[2J\033[H"
+    echo ""
+    echo -e "  ${HONEY}${BOLD}◆ VS Code: ${name}${RESET}"
+    echo -e "  ${DIM}${path}${RESET}"
+    echo ""
+    echo -e "  ${GREEN}✓${RESET} Copied to clipboard — paste in your local terminal"
+    echo ""
+    echo -e "  ${DIM}${vscode_cmd}${RESET}"
+    echo ""
+    echo -n -e "  ${DIM}Press any key...${RESET}"
+    read -rsn1
 
     tput civis 2>/dev/null || true
 }
@@ -1416,6 +1526,7 @@ cmd_help() {
     ${HONEY}hive tag${RESET} ${DIM}\"description\"${RESET}      Describe the current window
     ${HONEY}hive rename${RESET} ${DIM}<name>${RESET}           Rename the current window
     ${HONEY}hive close${RESET} ${DIM}[window]${RESET}          Close a window
+    ${HONEY}hive code${RESET} ${DIM}[window]${RESET}           Open window's directory in VS Code Remote
 
   ${BOLD}Auth${RESET}
     ${HONEY}hive auth setup${RESET}             Setup Claude Code auth for tmux sessions
@@ -1475,6 +1586,7 @@ main() {
         tag|desc|describe) cmd_tag "$@" ;;
         rename)     cmd_rename "$@" ;;
         close|kill) cmd_close "$@" ;;
+        code)       cmd_code "$@" ;;
         auth)       cmd_auth "$@" ;;
         fixssh)     cmd_fixssh "$@" ;;
         status)     cmd_status "$@" ;;
@@ -1488,6 +1600,7 @@ main() {
         _tui)          _run_tui ;;
         _tui_popup)    cmd__tui_popup ;;
         _status_line)  cmd__status_line ;;
+        _pane_path)    cmd__pane_path "$@" ;;
         _restore_meta) cmd__restore_meta ;;
         *)
             echo -e "${RED}Unknown command:${RESET} $cmd"
