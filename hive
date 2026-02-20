@@ -447,11 +447,11 @@ cmd_new() {
             set_window_meta "$HIVE_SESSION:$name" "$desc"
         fi
 
-        # If in tmux, switch to the new window
+        # If in tmux, switch to the new window in the current session (not the main hive session)
         if is_in_tmux; then
             local idx
             idx=$(tmux list-windows -t "$HIVE_SESSION" -F '#{window_name}|#{window_index}' | grep "^${name}|" | cut -d'|' -f2)
-            tmux select-window -t "$HIVE_SESSION:$idx" 2>/dev/null || true
+            tmux select-window -t ":$idx" 2>/dev/null || true
         fi
 
         echo -e "${GREEN}✓${RESET} Created window ${HONEY}${name}${RESET}"
@@ -777,7 +777,7 @@ _tui_action_join() {
     _tui_cleanup
 
     if is_in_tmux; then
-        tmux select-window -t "$HIVE_SESSION:$idx"
+        tmux select-window -t ":$idx"
     else
         _attach_new_view
     fi
