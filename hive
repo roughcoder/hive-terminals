@@ -164,7 +164,16 @@ get_windows() {
 }
 
 count_attached() {
-    tmux list-clients -t "$HIVE_SESSION" 2>/dev/null | wc -l | tr -d ' '
+    # Count clients on all sessions in the hive group (includes grouped link sessions)
+    local count=0
+    while IFS='|' read -r session group; do
+        if [[ "$group" == "$HIVE_SESSION" ]]; then
+            local c
+            c=$(tmux list-clients -t "$session" 2>/dev/null | wc -l | tr -d ' ')
+            count=$((count + c))
+        fi
+    done < <(tmux list-sessions -F '#{session_name}|#{session_group}' 2>/dev/null)
+    echo "$count"
 }
 
 # ── Init Commands ─────────────────────────────────────────────
