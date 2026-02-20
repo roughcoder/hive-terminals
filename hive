@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.3.1"
+VERSION="0.4.0"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
 HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
@@ -100,6 +100,14 @@ is_core() {
 is_link() {
     load_config
     [[ "${HIVE_ROLE:-}" == "link" ]]
+}
+
+_is_hive_session() {
+    # Check if current tmux session is in the hive group
+    local current_session group
+    current_session=$(tmux display-message -p '#{session_name}' 2>/dev/null) || return 1
+    group=$(tmux display-message -p '#{session_group}' 2>/dev/null) || true
+    [[ "$group" == "$HIVE_SESSION" || "$current_session" == "$HIVE_SESSION" ]]
 }
 
 ensure_hive_session() {
@@ -488,11 +496,16 @@ cmd_new() {
 
         echo -e "${GREEN}✓${RESET} Created window ${HONEY}${name}${RESET}"
     else
-        # On a link outside tmux: create window remotely then connect to it
-        ssh hive-core "${HIVE_REMOTE_PREFIX} hive new '$name' '$desc'" 2>/dev/null
-        # Now connect and switch to the new window
-        local remote_cmd="${HIVE_REMOTE_PREFIX} hive _attach_to '$name'"
-        exec ssh hive-core -t "$remote_cmd"
+        # On a link outside tmux: create window and connect
+        if [[ -n "$name" ]]; then
+            # Named window: create it remotely, then attach to it
+            ssh hive-core "${HIVE_REMOTE_PREFIX} hive new '$name' '$desc'" 2>/dev/null
+            local remote_cmd="${HIVE_REMOTE_PREFIX} hive _attach_to '$name'"
+            exec ssh hive-core -t "$remote_cmd"
+        else
+            # No name: just connect (creates a fresh window automatically)
+            exec ssh hive-core -t "${HIVE_REMOTE_PREFIX} hive _attach"
+        fi
     fi
 }
 
@@ -622,7 +635,8 @@ cmd_close() {
 # ── Interactive TUI ───────────────────────────────────────────
 
 cmd_tui() {
-    if is_link && ! is_in_tmux; then
+    if is_link; then
+        # Links always delegate to core (even inside tmux)
         ssh hive-core -t "${HIVE_REMOTE_PREFIX} hive _tui"
         return
     fi
@@ -812,7 +826,13 @@ _tui_action_join() {
     _tui_cleanup
 
     if is_in_tmux; then
-        tmux select-window -t ":$idx"
+        if _is_hive_session; then
+            # In a hive-grouped session: just switch window
+            tmux select-window -t ":$idx"
+        else
+            # In a different tmux session: switch client to hive
+            tmux switch-client -t "$HIVE_SESSION:$idx"
+        fi
     else
         # Attach to tmux and switch to the selected window
         local client_id="hive-link-$$"
@@ -1104,7 +1124,8 @@ cmd_help() {
   ${BOLD}Connect${RESET}
     ${HONEY}hive${RESET}                        Smart connect — TUI picker or attach
     ${HONEY}hive connect${RESET}                Connect to core (from link) or attach (on core)
-    ${HONEY}hive join${RESET}                   Interactive window picker
+    ${HONEY}hive join${RESET}                   Interactive window picker (works from any tmux session)
+    ${HONEY}hive switch${RESET}                 Alias for join
 
   ${BOLD}Windows${RESET}
     ${HONEY}hive ls${RESET}                     List all windows
@@ -1155,7 +1176,7 @@ main() {
             esac
             ;;
         connect)    cmd_connect "$@" ;;
-        join)       cmd_tui "$@" ;;
+        join|switch) cmd_tui "$@" ;;
         ls|list)    cmd_ls "$@" ;;
         new)        cmd_new "$@" ;;
         tag|desc|describe) cmd_tag "$@" ;;
