@@ -34,7 +34,7 @@ done
 mkdir -p "$INSTALL_DIR"
 
 # Try local copy first (cloned repo), fall back to downloading from GitHub
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}" 2>/dev/null)" && pwd 2>/dev/null || echo "")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd 2>/dev/null || echo "")"
 if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/hive" ]]; then
     cp "$SCRIPT_DIR/hive" "$INSTALL_DIR/hive"
     echo -e "  ${GREEN}✓${RESET} Installed from local repo"
