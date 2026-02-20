@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.8.0"
+VERSION="0.9.0"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
 HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
@@ -487,6 +487,14 @@ SSHCONF
         else
             echo -e "  ${AMBER}!${RESET} Hive not found on core — install it there too with ${HONEY}hive init core${RESET}"
         fi
+
+        # Register this link's Tailscale hostname on the core (for VS Code remote, etc.)
+        local ts_name
+        ts_name=$(_get_tailscale_hostname)
+        if [[ -n "$ts_name" ]]; then
+            ssh hive-core "${HIVE_REMOTE_PREFIX} hive _register_link '$ts_name'" 2>/dev/null || true
+            echo -e "  ${GREEN}✓${RESET} Registered link ${DIM}(${ts_name})${RESET} on core"
+        fi
     else
         echo -e "  ${AMBER}!${RESET} Could not connect — check the hostname and that SSH keys are set up"
         echo -e "  ${DIM}You may need to run: ssh-copy-id ${core_user}@${core_host}${RESET}"
@@ -494,6 +502,24 @@ SSHCONF
 
     echo -e "\n${HONEY}${SYM_HIVE} Link is ready!${RESET}"
     echo -e "  ${DIM}Run ${RESET}${HONEY}hive${RESET}${DIM} to connect to core${RESET}\n"
+}
+
+_get_tailscale_hostname() {
+    # Try to get this machine's Tailscale short hostname
+    local ts_cmd=""
+    if command -v tailscale &>/dev/null; then
+        ts_cmd="tailscale"
+    elif [[ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]]; then
+        ts_cmd="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    fi
+
+    if [[ -n "$ts_cmd" ]]; then
+        "$ts_cmd" status --json 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(d['Self']['DNSName'].rstrip('.').split('.')[0])
+" 2>/dev/null
+    fi
 }
 
 _ensure_in_path() {
@@ -897,13 +923,33 @@ cmd_code() {
             return 1
         fi
 
-        if [[ -n "$path" ]]; then
-            echo -e "${HONEY}${SYM_HIVE}${RESET} Opening ${HONEY}${path}${RESET} in VS Code..."
-            code "$path"
-        else
+        if [[ -z "$path" ]]; then
             echo -e "${RED}Error:${RESET} Could not determine working directory"
             return 1
         fi
+
+        # Try to open on a registered link machine
+        local link_host=""
+        if [[ -f "$HIVE_DIR/vscode-host" ]]; then
+            link_host=$(cat "$HIVE_DIR/vscode-host")
+        fi
+
+        if [[ -n "$link_host" ]]; then
+            echo -e "${HONEY}${SYM_HIVE}${RESET} Opening ${HONEY}${path}${RESET} in VS Code on ${DIM}${link_host}${RESET}..."
+            ssh -o ConnectTimeout=5 -o BatchMode=yes "$link_host" "code --remote ssh-remote+hive-core '${path}'" 2>/dev/null
+        else
+            echo -e "${HONEY}${SYM_HIVE}${RESET} Opening ${HONEY}${path}${RESET} in VS Code..."
+            code "$path"
+        fi
+    fi
+}
+
+# Internal: register a link machine's hostname on the core
+cmd__register_link() {
+    local hostname="${1:-}"
+    if [[ -n "$hostname" ]]; then
+        ensure_dir
+        echo "$hostname" > "$HIVE_DIR/vscode-host"
     fi
 }
 
@@ -1265,15 +1311,10 @@ _tui_action_code() {
         return
     fi
 
-    local vscode_cmd="code --remote ssh-remote+hive-core ${path}"
-
-    # Try OSC 52 clipboard copy (works through tmux → SSH → iTerm2)
-    local encoded
-    encoded=$(printf '%s' "$vscode_cmd" | base64 | tr -d '\n')
-    printf '\033]52;c;%s\a' "$encoded"
-
-    # Also set tmux buffer as fallback
-    tmux set-buffer "$vscode_cmd" 2>/dev/null || true
+    local link_host=""
+    if [[ -f "$HIVE_DIR/vscode-host" ]]; then
+        link_host=$(cat "$HIVE_DIR/vscode-host")
+    fi
 
     tput cnorm 2>/dev/null || true
     echo -ne "\033[2J\033[H"
@@ -1281,9 +1322,30 @@ _tui_action_code() {
     echo -e "  ${HONEY}${BOLD}◆ VS Code: ${name}${RESET}"
     echo -e "  ${DIM}${path}${RESET}"
     echo ""
-    echo -e "  ${GREEN}✓${RESET} Copied to clipboard — paste in your local terminal"
-    echo ""
-    echo -e "  ${DIM}${vscode_cmd}${RESET}"
+
+    if [[ -n "$link_host" ]]; then
+        # SSH back to link machine and open VS Code directly
+        echo -e "  ${DIM}Opening on ${link_host}...${RESET}"
+        if ssh -o ConnectTimeout=5 -o BatchMode=yes "$link_host" "code --remote ssh-remote+hive-core '${path}'" 2>/dev/null; then
+            echo -e "  ${GREEN}✓${RESET} VS Code opened"
+        else
+            echo -e "  ${RED}✗${RESET} Could not reach ${link_host}"
+            local vscode_cmd="code --remote ssh-remote+hive-core ${path}"
+            echo -e "  ${DIM}Run manually: ${vscode_cmd}${RESET}"
+        fi
+    else
+        # Fallback: copy to clipboard via OSC 52
+        local vscode_cmd="code --remote ssh-remote+hive-core ${path}"
+        local encoded
+        encoded=$(printf '%s' "$vscode_cmd" | base64 | tr -d '\n')
+        printf '\033]52;c;%s\a' "$encoded"
+        tmux set-buffer "$vscode_cmd" 2>/dev/null || true
+        echo -e "  ${GREEN}✓${RESET} Copied to clipboard — paste in your local terminal"
+        echo -e "  ${DIM}${vscode_cmd}${RESET}"
+        echo ""
+        echo -e "  ${DIM}Tip: run ${RESET}${HONEY}hive init link${RESET}${DIM} to enable direct VS Code opening${RESET}"
+    fi
+
     echo ""
     echo -n -e "  ${DIM}Press any key...${RESET}"
     read -rsn1
@@ -1600,6 +1662,7 @@ main() {
         _tui)          _run_tui ;;
         _tui_popup)    cmd__tui_popup ;;
         _status_line)  cmd__status_line ;;
+        _register_link) cmd__register_link "$@" ;;
         _pane_path)    cmd__pane_path "$@" ;;
         _restore_meta) cmd__restore_meta ;;
         *)
