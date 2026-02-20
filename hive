@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://raw.githubusercontent.com/${HIVE_REPO}/main/hive"
 HIVE_DIR="$HOME/.hive"

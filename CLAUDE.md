@@ -48,10 +48,23 @@ bash install.sh
 
 ## Versioning & self-update
 
-- Version is stored in the `VERSION` variable at the top of `hive` (e.g., `VERSION="0.1.0"`).
+- Version is stored in the `VERSION` variable at the top of `hive` (e.g., `VERSION="0.2.0"`).
 - `hive update` downloads the latest `hive` from the GitHub raw main branch (`roughcoder/hive-terminals`) and replaces the local script.
 - `install.sh` supports both local install (from a cloned repo) and remote install via `curl` pipe (downloads from GitHub if no local `hive` file is found).
-- When bumping versions, update only the `VERSION` variable in `hive`. The rest is automatic.
+- **Bump the `VERSION` in `hive` on every commit** so users can verify updates worked via `hive version`.
+- Follows semver: patch for fixes, minor for features, major for breaking changes.
+
+## Commits
+
+Use **Conventional Commits** format:
+
+- `feat: <description>` — new feature (bump minor)
+- `fix: <description>` — bug fix (bump patch)
+- `docs: <description>` — documentation only
+- `refactor: <description>` — code change that neither fixes nor adds
+- `chore: <description>` — maintenance tasks
+
+Always include `Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>` in the commit body.
 
 ## Conventions
 
