@@ -9,7 +9,7 @@ set -euo pipefail
 # ║  Every terminal tab is a window into the same hive.          ║
 # ╚══════════════════════════════════════════════════════════════╝
 
-VERSION="0.5.0"
+VERSION="0.6.0"
 HIVE_REPO="roughcoder/hive-terminals"
 HIVE_RAW_URL="https://api.github.com/repos/${HIVE_REPO}/contents/hive"
 HIVE_CURL_OPTS=(-fsSL -H "Accept: application/vnd.github.v3.raw")
@@ -185,6 +185,94 @@ count_attached() {
     echo "$count"
 }
 
+# ── SSH Agent Persistence ─────────────────────────────────────
+# SSH_AUTH_SOCK goes stale when tmux sessions persist across reboots
+# or detach/reattach. We fix this with a stable symlink at
+# ~/.ssh/ssh_auth_sock that always points to the current live socket.
+
+_setup_ssh_agent_persistence() {
+    mkdir -p "$HOME/.ssh"
+    local symlink="$HOME/.ssh/ssh_auth_sock"
+
+    # 1. Create ~/.ssh/rc to update symlink on incoming SSH connections
+    local ssh_rc="$HOME/.ssh/rc"
+    local rc_marker="# hive: ssh agent socket persistence"
+    if [[ -f "$ssh_rc" ]] && grep -q "$rc_marker" "$ssh_rc" 2>/dev/null; then
+        : # Already configured
+    elif [[ -f "$ssh_rc" ]]; then
+        # Append to existing rc
+        cat >> "$ssh_rc" << 'SSHRC'
+
+# hive: ssh agent socket persistence
+if [ -S "$SSH_AUTH_SOCK" ] && [ "$SSH_AUTH_SOCK" != "$HOME/.ssh/ssh_auth_sock" ]; then
+    ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock"
+fi
+SSHRC
+    else
+        cat > "$ssh_rc" << 'SSHRC'
+#!/bin/bash
+# hive: ssh agent socket persistence
+if [ -S "$SSH_AUTH_SOCK" ] && [ "$SSH_AUTH_SOCK" != "$HOME/.ssh/ssh_auth_sock" ]; then
+    ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock"
+fi
+SSHRC
+        chmod +x "$ssh_rc"
+    fi
+
+    # 2. Add shell profile snippet to keep symlink current for local sessions
+    #    (covers login sessions, new terminal tabs, etc.)
+    local profile_marker="# hive: ssh agent socket persistence"
+    local profile=""
+    for p in "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.profile"; do
+        if [[ -f "$p" ]]; then
+            profile="$p"
+            break
+        fi
+    done
+    # Default to .zprofile on macOS
+    profile="${profile:-$HOME/.zprofile}"
+
+    if ! grep -q "$profile_marker" "$profile" 2>/dev/null; then
+        cat >> "$profile" << 'PROFILE'
+
+# hive: ssh agent socket persistence
+if [ -S "$SSH_AUTH_SOCK" ] && [ "$SSH_AUTH_SOCK" != "$HOME/.ssh/ssh_auth_sock" ]; then
+    ln -sf "$SSH_AUTH_SOCK" "$HOME/.ssh/ssh_auth_sock"
+fi
+PROFILE
+    fi
+
+    # 3. Create the symlink now if we have a valid socket
+    if [[ -S "${SSH_AUTH_SOCK:-}" ]] && [[ "${SSH_AUTH_SOCK:-}" != "$symlink" ]]; then
+        ln -sf "$SSH_AUTH_SOCK" "$symlink"
+    fi
+
+    # 4. Add SSH agent config to tmux.conf if not already present
+    local tmux_conf="$HIVE_DIR/tmux.conf"
+    if [[ -f "$tmux_conf" ]] && ! grep -q "ssh_auth_sock" "$tmux_conf" 2>/dev/null; then
+        cat >> "$tmux_conf" << 'SSHAGENT'
+
+# SSH agent socket persistence — use stable symlink path
+set -g update-environment "DISPLAY SSH_ASKPASS SSH_AGENT_PID SSH_CONNECTION WINDOWID XAUTHORITY"
+setenv -g SSH_AUTH_SOCK $HOME/.ssh/ssh_auth_sock
+SSHAGENT
+    fi
+}
+
+_refresh_ssh_socket() {
+    # Update the symlink to the current live SSH agent socket
+    local symlink="$HOME/.ssh/ssh_auth_sock"
+    if [[ -S "${SSH_AUTH_SOCK:-}" ]] && [[ "${SSH_AUTH_SOCK:-}" != "$symlink" ]]; then
+        ln -sf "$SSH_AUTH_SOCK" "$symlink"
+        echo -e "${GREEN}✓${RESET} SSH agent socket updated"
+    elif [[ -S "$symlink" ]]; then
+        echo -e "${GREEN}✓${RESET} SSH agent socket symlink is valid"
+    else
+        echo -e "${AMBER}!${RESET} No active SSH agent socket found"
+        echo -e "  ${DIM}Try: ssh-add --apple-use-keychain${RESET}"
+    fi
+}
+
 # ── Init Commands ─────────────────────────────────────────────
 
 cmd_init_core() {
@@ -224,6 +312,10 @@ set -g window-status-separator ""
 # Pane borders
 set -g pane-border-style "fg=#333333"
 set -g pane-active-border-style "fg=#d4a843"
+
+# SSH agent socket persistence — use stable symlink path
+set -g update-environment "DISPLAY SSH_ASKPASS SSH_AGENT_PID SSH_CONNECTION WINDOWID XAUTHORITY"
+setenv -g SSH_AUTH_SOCK $HOME/.ssh/ssh_auth_sock
 
 # Key bindings for hive integration
 bind-key H run-shell "hive _tui_popup"
@@ -280,6 +372,11 @@ PLIST
     launchctl unload "$plist" 2>/dev/null || true
     launchctl load "$plist" 2>/dev/null || true
     echo -e "  ${GREEN}✓${RESET} tmux server starting on boot"
+
+    # SSH agent socket persistence
+    # Create a stable symlink so SSH_AUTH_SOCK survives tmux detach/reattach
+    _setup_ssh_agent_persistence
+    echo -e "  ${GREEN}✓${RESET} SSH agent persistence configured"
 
     # Start the hive session
     ensure_hive_session
@@ -666,6 +763,43 @@ cmd_close() {
     else
         echo -e "${RED}Error:${RESET} Must be inside a hive session or specify a window."
     fi
+}
+
+# ── SSH Agent Fix ──────────────────────────────────────────────
+
+cmd_fixssh() {
+    load_config
+
+    if is_link && ! is_in_tmux; then
+        ssh hive-core "${HIVE_REMOTE_PREFIX} hive fixssh"
+        return
+    fi
+
+    echo -e "\n${HONEY}${SYM_HIVE} SSH agent fix${RESET}\n"
+
+    # Refresh the symlink
+    _refresh_ssh_socket
+
+    # If inside tmux, also update the session environment
+    if is_in_tmux; then
+        # Import from tmux session environment into current shell
+        local sock
+        sock=$(tmux show-environment SSH_AUTH_SOCK 2>/dev/null | grep -v '^-' | cut -d= -f2 || true)
+        if [[ -n "$sock" ]]; then
+            echo -e "  ${DIM}tmux session socket: ${sock}${RESET}"
+        fi
+    fi
+
+    # Test SSH connectivity
+    if ssh-add -l &>/dev/null; then
+        local key_count
+        key_count=$(ssh-add -l 2>/dev/null | wc -l | tr -d ' ')
+        echo -e "  ${GREEN}✓${RESET} SSH agent has ${key_count} key(s) loaded"
+    else
+        echo -e "  ${AMBER}!${RESET} No SSH keys loaded in agent"
+        echo -e "  ${DIM}Run: ssh-add --apple-use-keychain ~/.ssh/id_ed25519${RESET}"
+    fi
+    echo ""
 }
 
 # ── Interactive TUI ───────────────────────────────────────────
@@ -1191,6 +1325,7 @@ cmd_help() {
 
   ${BOLD}Info${RESET}
     ${HONEY}hive status${RESET}                 Show machine role and connection info
+    ${HONEY}hive fixssh${RESET}                 Fix stale SSH agent socket in tmux
     ${HONEY}hive update${RESET}                 Update hive to the latest version
     ${HONEY}hive update --check${RESET}         Check for updates without installing
     ${HONEY}hive help${RESET}                   This help
@@ -1241,6 +1376,7 @@ main() {
         tag|desc|describe) cmd_tag "$@" ;;
         rename)     cmd_rename "$@" ;;
         close|kill) cmd_close "$@" ;;
+        fixssh)     cmd_fixssh "$@" ;;
         status)     cmd_status "$@" ;;
         update)     cmd_update "$@" ;;
         shell-init) cmd_shell_init "$@" ;;
